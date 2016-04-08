@@ -1,0 +1,260 @@
+---
+title: "KotggenDataPrep"
+author: "Nick Burns"
+date: "8 April 2016"
+output: html_document
+---
+
+# Kottgen vs. Leffler  
+
+The plan is to identify regions of interest in the Leffler dataset, and to create classical locus zooms of these same regions in the Kottgen data set. To do this we will need to prepare the Kottgen dataset (first section beneath), identify regions of interest in Leffler (second section) and finally visualise (thrid section).
+
+
+## Data prep for the loci exploration of the Kottgen dataset.
+
+Kottgen summary level statistics were downloaded from: http://metabolomics.helmholtz-muenchen.de/gugc/, 8 April 2015. The summary level files are apprx. 130 MB each, which isn't huge, but we don't need ot deal with quite so much data.
+
+Filter datasets to P <= 0.1.
+
+
+```{r}
+setwd("/mnt/DataDrive/Kottgen")
+library(data.table)
+
+urate <- fread("GUGC_MetaAnalysis_Results_UA.csv", header=TRUE, data.table = FALSE)
+dim(urate)
+
+gout <- fread("GUGC_MetaAnalysis_Results_Gout.csv", header=TRUE, data.table = FALSE)
+dim(gout)
+```
+
+Here is hte head of these two files:
+
+```{r}
+head(urate)
+head(gout)
+```
+
+Looking at the distribution of p-values:
+
+```{r}
+hist(urate$p_gc)
+hist(gout$p_gc)
+```
+
+And we will filter these to p-values <= 0.01, which we can see from the above plots will end up being < 10 % the size.
+
+```{r}
+filterGwas <- function (data, threshold = 0.01) {
+    return (data[data$p_gc < threshold, ])
+}
+
+write.csv(filterGwas(urate), "Kottgen_Urate_SummaryStats_Filtered.csv", row.names=FALSE)
+write.csv(filterGwas(gout), "Kottgen_Gout_SummaryStats_Filtered.csv", row.names=FALSE)
+```
+
+### Get chromosome and position  
+
+These summary files do not include chromosome numbers or position. Need to query these based on the marker name. I will test this function here, and then include it in GLIDA.
+
+```{r}
+urateSet <- filterGwas(urate, threshold=0.1)
+goutSet <- filterGwas(gout, threshold = 0.1)
+
+library(RMySQL)
+
+queryPos <- function (snps, conn) {
+    
+    formatSNPs <- sprintf("('%s')", paste(snps, collapse="','"))
+    query <- paste0("
+                    SELECT chrom,
+                           chromStart as POS,
+                           name as MarkerName,
+                           strand
+                    FROM snp142
+                    WHERE name IN ", formatSNPs, "
+                      AND chrom NOT LIKE 'chr%hap%';
+                    ")
+    
+    results <- dbGetQuery(conn, query)
+    
+    return (results)
+}
+
+updatePos <- function (snpList) {
+    
+    options(warn = -1)
+    conn <- dbConnect(RMySQL::MySQL(),
+                           user = "genome", 
+                           host = "genome-mysql.cse.ucsc.edu",
+                           dbname = "hg19", 
+                           password = "")
+    
+    snpPositions <- queryPos(snpList$MarkerName, conn)
+    
+    snpList <- merge(snpList, snpPositions, by="MarkerName")
+    
+    dbDisconnect(conn)
+    options(warn = 0)
+    
+    return (snpList)
+}
+
+urateUpdated <- updatePos(urateSet)
+goutUpdated <- updatePos(goutSet)
+```
+
+Parse the chromosome column and remove the 'chr' prefix:
+
+```{r}
+urateUpdated$chrom <- sub("chr", "", urateUpdated$chrom)
+goutUpdated$chrom <- sub("chr", "", goutUpdated$chrom)
+
+head(urateUpdated)
+head(goutUpdated)
+
+write.csv(urateUpdated, "Kottgen_Urate_SummaryStats_Filtered.csv")
+write.csv(goutUpdated, "Kottgen_Gout_SummaryStats_Filtered.csv")
+```
+
+## Leffler: Identify Regions of interest  
+
+Supplmentary tables 4 and 5 are a summary of interesting SNPs that were identified in the Leffler paper. We will cluster these to try to reduce the total number of regions we need to plot.
+
+```{r}
+setwd("/home/nickb/Documents/GitHub/Kottgen_ReseqAnalysis")
+
+leffler4 <- read.csv("Data/LefflerTablesS4.csv")
+leffler5 <- read.csv("Data/LefflerTablesS5.csv")
+
+head(leffler4)
+head(leffler5)
+```
+
+We will combine both of these tables and treat them as a single dataset to explore.
+
+```{r}
+lefflerCombined <- leffler4[, c("Chr19", "Position_hg19", "SNP")]
+colnames(lefflerCombined) <- c("CHR", "POS", "SNP")
+lefflerCombined <- rbind(lefflerCombined,
+                         data.frame(CHR = leffler5$Chr_hg19, 
+                                    POS = leffler5$Position_hg19,
+                                    SNP = leffler5$SNP))
+dim(lefflerCombined)
+head(lefflerCombined)
+```
+
+Use DBSCAN for clustering  
+
+```{r}
+library(dbscan)
+getWindows <- function (data, eps=0.5, minPts=1) {
+    
+    # Finds windows of interest by clustering the SNPs in each chromosome.
+    #
+    # Parameters:
+    # -----------
+    #
+    #     data: data frame (CHR, SNP, POS)
+    #     eps: float
+    #         Neighbourhood radius for DBSCAN
+    #         DEFAULT = 0.5 (500KB)
+    #     minPts: int
+    #         ncore points parameter for DBSCAN
+    #         DEFAULT = 1
+    #
+    # Returns:
+    # --------
+    #
+    #     data: data frame (CHR, SNP, POS, P, Phenotype, Nation, LociID)
+    #         GWAS Summary data.
+    
+    data$LociID <- 0  # initially set all SNPs to a NULL loci / window
+    
+    # cluster by chromosome
+    # NOTE: by chr so that we don't end up with windows which span chr.
+    for (chrom in unique(data$CHR)) {
+        
+        idxCHR <- data$CHR == chrom
+        window <- dbscan(as.matrix(data[idxCHR, "POS"])/1000000, 
+                         eps=eps, minPts=minPts)
+        
+        # record the LociID (i.e. window ID) for all SNPs
+        # NOTE: DBSCAN always returns {1, 2, ...}, so we need to offset
+        # these integer labels by the current max to ensure we don't repeat IDs
+        data$LociID[idxCHR] <- window$cluster + max(data$LociID)
+        
+    }
+    return (data)
+}
+leffler <- getWindows(lefflerCombined, eps=2)
+leffler <- unique(leffler)
+```
+
+Nice, that was super quick. If we inspect these:
+
+```{r}
+nrow(lefflerCombined)
+max(leffler$LociID)
+```
+
+Ouch, even with a neighbourhood radius of 2 MB, there are still 294 loci. That is too many to be realistic. I need to think about this a little.
+
+## Kottgen Loci
+
+294 loci are too many really. I need to think of ways to summarise the characteristics of these loci. If I can describe the Kottgen data at each loci,then I might be able to find a way to reduce complexity and produce a sensible result set. The first job then is to extract these loci from the Kottgen data.
+
+For each leffler loci, I will extract the CHR, min(POS) and max(POS) and use these to extract the same regions from Kottgen.
+
+```{r}
+library(dplyr)
+loci <- dplyr::summarise(group_by(leffler, LociID),
+                         CHR = unique(CHR),
+                         start = min(POS),
+                         end = max(POS),
+                         nSNPs = )
+head(loci)
+```
+
+Let's make life really easy to start with and plot the first few of these. First, we will extract a trial dataset and then plot it:
+
+```{r}
+extractKottgen <- function (kottgenData, region, delta = 500000) {
+    
+    lclChr <- region$CHR
+    lclStart <- region$start * 1000000 - delta
+    lclEnd <- region$end * 1000000 + delta
+
+    loci <- kottgenData[(kottgenData$chrom == lclChr) & 
+                        (kottgenData$POS >= lclStart) &
+                            (kottgenData$POS <= lclEnd), ]
+    loci$LociID <- unique(region$LociID)
+    
+    return (loci)
+}
+
+trialLoci <- do.call(rbind, 
+                     lapply(1:6, 
+                            function (k) extractKottgen(urateUpdated, loci[loci$LociID == k, ])))
+dim(trialLoci)
+head(trialLoci)
+```
+
+And plotting these:
+
+```{r}
+library(ggplot2)
+plotZoom <- function (data) {
+    
+    data <- data[, c("MarkerName", "p_gc", "chrom", "POS", "LociID")]
+    colnames(data) <- c("SNP", "P", "CHR", "POS", "LociID")
+    data$P <- -log10(data$P)
+    data$POS <- data$POS / 1000000
+    
+    ggplot(data, aes(x = POS, y = P)) +
+        geom_point(colour = "steelblue") +
+        facet_wrap(~ LociID, scales = "free_x") +
+        theme_bw()
+}
+plotZoom(trialLoci)
+```
