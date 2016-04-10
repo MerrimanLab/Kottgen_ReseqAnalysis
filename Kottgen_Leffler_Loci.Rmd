@@ -1,0 +1,287 @@
+---
+title: "Kottgen_Leffler_Loci"
+author: "Nick Burns"
+date: "11 April 2016"
+output: html_document
+---
+
+
+# Kottgen  & Leffler Loci  
+
+Using the loci identified by Leffler, we will extract and visualise the same regions from the Kottgen dataset. The plan is as follows:  
+
+  1. Filter the full Kottgen dataset to a more manageable size (p-values < 0.1).  
+  2. Update the chromosomal positions in the Kottgen data.  
+  3. Identify regions of interest in the Leffler dataset.  
+  4. Visualise these same regions in the Kottgen dataset.
+
+Note, that at this stage we will deal exclusively with the urate summary statistics released by Kottgen.
+
+## 1. Fitler the kottgen data
+
+Kottgen summary level statistics were downloaded from: http://metabolomics.helmholtz-muenchen.de/gugc/, 8 April 2015. The summary level files are apprx. 130 MB each, which isn't huge, but we don't need ot deal with quite so much data.
+
+```{r}
+setwd("/mnt/DataDrive/Kottgen")
+library(data.table)
+
+urate <- fread("GUGC_MetaAnalysis_Results_UA.csv", header=TRUE, data.table = FALSE)
+dim(urate)
+head(urate)
+```
+
+Filter to p-values <= 0.1
+
+```{r}
+filterGwas <- function (data, threshold = 0.1) {
+    return (data[data$p_gc < threshold, ])
+}
+
+write.csv(filterGwas(urate), "Kottgen_Urate_SummaryStats_Filtered.csv", row.names=FALSE)
+```
+
+## 2. Get chromosome and position  
+
+These summary files do not include chromosome numbers or position. Need to query these based on the marker name. I will test this function here, and then include it in GLIDA.
+
+```{r}
+urate <- filterGwas(urate, threshold=0.1)
+
+library(glida)
+
+snpPOS <- queryUCSC(updatePositions(urate$MarkerName))
+urate <- merge(urate, snpPOS, by.x = "MarkerName", by.y = "SNP")
+
+urate$chrom <- gsub("chr", "", urate$chrom)
+
+head(urate)
+```
+
+For convenience, I will write this working set out to file.
+
+```{r}
+setwd("/home/nickb/Documents/GitHub/Kottgen_ReseqAnalysis")
+write.csv(urate, "Data/Kottgen_Urate_SummaryStats_Filtered.csv", row.names = FALSE)
+```
+
+## 3. Leffler: Identify Regions of interest  
+
+Supplmentary tables 4 and 5 are a summary of interesting SNPs that were identified in the Leffler paper. We will cluster these to try to reduce the total number of regions we need to plot.
+
+```{r}
+urate <- read.csv("Data/Kottgen_Urate_SummaryStats_Filtered.csv")
+leffler4 <- read.csv("Data/LefflerTablesS4.csv")
+leffler5 <- read.csv("Data/LefflerTablesS5.csv")
+
+head(leffler4)
+head(leffler5)
+```
+
+We will combine both of these tables and treat them as a single dataset to explore.
+
+```{r}
+lefflerCombined <- leffler4[, c("Chr19", "Position_hg19", "SNP")]
+colnames(lefflerCombined) <- c("CHR", "POS", "SNP")
+lefflerCombined <- rbind(lefflerCombined,
+                         data.frame(CHR = leffler5$Chr_hg19, 
+                                    POS = leffler5$Position_hg19,
+                                    SNP = leffler5$SNP))
+dim(lefflerCombined)
+head(lefflerCombined)
+```
+
+Use DBSCAN for clustering  
+
+```{r}
+library(dbscan)
+getWindows <- function (data, eps=0.5, minPts=1) {
+    
+    # Finds windows of interest by clustering the SNPs in each chromosome.
+    #
+    # Parameters:
+    # -----------
+    #
+    #     data: data frame (CHR, SNP, POS)
+    #     eps: float
+    #         Neighbourhood radius for DBSCAN
+    #         DEFAULT = 0.5 (500KB)
+    #     minPts: int
+    #         ncore points parameter for DBSCAN
+    #         DEFAULT = 1
+    #
+    # Returns:
+    # --------
+    #
+    #     data: data frame (CHR, SNP, POS, P, Phenotype, Nation, LociID)
+    #         GWAS Summary data.
+    
+    data$LociID <- 0  # initially set all SNPs to a NULL loci / window
+    
+    # cluster by chromosome
+    # NOTE: by chr so that we don't end up with windows which span chr.
+    for (chrom in unique(data$CHR)) {
+        
+        idxCHR <- data$CHR == chrom
+        window <- dbscan(as.matrix(data[idxCHR, "POS"])/1000000, 
+                         eps=eps, minPts=minPts)
+        
+        # record the LociID (i.e. window ID) for all SNPs
+        # NOTE: DBSCAN always returns {1, 2, ...}, so we need to offset
+        # these integer labels by the current max to ensure we don't repeat IDs
+        data$LociID[idxCHR] <- window$cluster + max(data$LociID)
+        
+    }
+    return (data)
+}
+leffler <- getWindows(lefflerCombined, eps = 0.2)
+leffler <- unique(leffler)
+```
+
+Nice, that was super quick. If we inspect these:
+
+```{r}
+nrow(lefflerCombined)
+max(leffler$LociID)
+```
+
+
+
+## 4. Kottgen Loci
+
+There are a lot of loci here (~ 400). However, not all of these will be interesting. We will extract all of these loci from the Kottgen data, and then identify those with p-values that reach nominal significance (10-5).
+
+For each leffler loci, extract the CHR, min(POS) and max(POS) and use these to extract the same regions from Kottgen.
+
+```{r}
+library(dplyr)
+loci <- dplyr::summarise(group_by(leffler, LociID),
+                         CHR = unique(CHR),
+                         start = min(POS),
+                         end = max(POS),
+                         nSNPs = n())
+head(loci)
+```
+
+Extract these regions from the Kottgen data:
+
+```{r}
+extractKottgen <- function (kottgenData, region, delta = 500000) {
+    
+    lclChr <- region$CHR
+    lclStart <- region$start - delta
+    lclEnd <- region$end + delta
+
+    #print(c(lclChr, lclStart, lclEnd))
+    loci <- kottgenData[(kottgenData$chrom == lclChr) & 
+                        (kottgenData$POS >= lclStart) &
+                            (kottgenData$POS <= lclEnd), ]
+    if (nrow(loci) > 0)
+        loci$LociID <- unique(region$LociID)
+    
+    return (loci)
+}
+
+kottgenLoci <- do.call(rbind, 
+                     lapply(unique(loci$LociID), 
+                            function (k) extractKottgen(urate, loci[loci$LociID == k, ])))
+dim(kottgenLoci)
+head(kottgenLoci)
+```
+
+
+### Summary stats of the Kottgen Loci
+
+Whilst there are over 400 loci from the Leffler set, not all of these will reach anywhere near genome-wide significance. Here, we will plot each loci and label those which have a p-value less that 10-5.
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+kottgenByLoci <- summarise(group_by(kottgenLoci, chrom, LociID),
+                           nLoci = n(),
+                           maxP = max(-log10(p_gc)))
+head(kottgenByLoci)
+
+ggplot(kottgenByLoci, aes(x = chrom, y = LociID)) +
+    geom_point(aes(size = maxP), colour = "steelblue", alpha = 0.7) +
+    theme_bw() +
+    geom_text_repel(data = kottgenByLoci[kottgenByLoci$maxP > 5, ],
+              aes(x = chrom, y = LociID, label = LociID),
+              size = 5)
+```
+
+Based on the above therefore, there are only 10 loci with p-values < 10-5.
+
+```{r}
+targetLoci <- kottgenByLoci[kottgenByLoci$maxP > 5, ]
+strongLoci <- kottgenLoci[kottgenLoci$LociID %in% targetLoci$LociID, ]
+
+ggplot(strongLoci,
+       aes(x = POS / 1000000, y = -log10(p_gc))) +
+    geom_point(colour = "grey") +
+    facet_wrap(~ LociID + chrom, scales = "free") +
+    theme_bw() +
+    geom_hline(yintercept = 5, colour = "blue", linetype = "dashed") +
+    geom_hline(yintercept = 8, colour = "red", linetype = "dashed") +
+    xlab('POS') + ylab("-log10(P)")
+```
+
+These top 10 loci are potentially interesting. 
+
+### Plots for Tony  
+
+For Tony, we will plot the top 50 loci (ordered by p-values). Each loci will be defined by the lead SNP (the SNP with the lowest p-value), and padded by +/- 500MB in each direction.
+
+```{r}
+library(glida)
+K <- 30
+
+getKottgenLoci <- function (loci, urate, delta = 500000) {
+    lclLoci <- urate[urate$chrom == loci$chrom, ]
+    lclLoci$LogP <- -log10(lclLoci$p_gc)
+    
+    lociCenter <- lclLoci[lclLoci$LogP == loci$maxP, "POS"]
+    
+    padLoci <- c(lociCenter - delta, lociCenter + delta) 
+    lclLoci <- lclLoci[lclLoci$POS >= padLoci[1] & 
+                           lclLoci$POS <= padLoci[2], ]
+    
+    return (lclLoci)
+}
+rankedLoci <- order(kottgenByLoci$maxP, decreasing = TRUE)
+topLoci <- kottgenByLoci[rankedLoci[1:K], ]
+
+lociPlots <- list()
+for (i in 1:K) {
+    
+    lclLoci <- topLoci[i, ]
+    lclData <- getKottgenLoci(lclLoci, urate)
+    lclData$position <- lclData$POS / 1000000
+    
+    # create the locus zoom
+    zoom <- ggplot(lclData, aes(x = position, y = -log10(p_gc))) +
+        geom_point() +
+        theme_bw()
+    
+    genes <- queryUCSC(fromUCSCEnsemblGenes(chromosome = unique(lclData$chrom),
+                                            start = min(lclData$POS),
+                                            end = max(lclData$POS)))
+    
+    zoom <- geneAnnotation(zoom, genes)
+    
+    plotTitle <- sprintf("Chromosome %s: (Rank %s)", lclLoci$chrom, i)
+    zoom <- zoom + 
+        geom_hline(yintercept = 5, colour = "blue", linetype = "dashed") +
+        geom_hline(yintercept = 8, colour = "red", linetype = "dashed") +
+        xlab("Position (MB)") + ylab("-log10(P)") +
+        ggtitle(plotTitle)
+    
+    filename <- sprintf("LociPlots/Rank_%s_Chromosome_%s.png", i, lclLoci$chrom)
+    ggsave(filename, zoom)
+    
+    lociPlots[[i]] <- zoom
+}
+
+# write the loci summary to disk as well.
+write.csv(kottgenByLoci, "rank_loci_summary.csv", row.names = F)
+```
+

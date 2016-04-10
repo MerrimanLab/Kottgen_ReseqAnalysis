@@ -124,6 +124,7 @@ Supplmentary tables 4 and 5 are a summary of interesting SNPs that were identifi
 ```{r}
 setwd("/home/nickb/Documents/GitHub/Kottgen_ReseqAnalysis")
 
+kottgenUrate <- read.csv("Data/Kottgen_Urate_SummaryStats_Filtered.csv")
 leffler4 <- read.csv("Data/LefflerTablesS4.csv")
 leffler5 <- read.csv("Data/LefflerTablesS5.csv")
 
@@ -212,7 +213,7 @@ loci <- dplyr::summarise(group_by(leffler, LociID),
                          CHR = unique(CHR),
                          start = min(POS),
                          end = max(POS),
-                         nSNPs = )
+                         nSNPs = n())
 head(loci)
 ```
 
@@ -222,39 +223,103 @@ Let's make life really easy to start with and plot the first few of these. First
 extractKottgen <- function (kottgenData, region, delta = 500000) {
     
     lclChr <- region$CHR
-    lclStart <- region$start * 1000000 - delta
-    lclEnd <- region$end * 1000000 + delta
+    lclStart <- region$start - delta
+    lclEnd <- region$end + delta
 
+    #print(c(lclChr, lclStart, lclEnd))
     loci <- kottgenData[(kottgenData$chrom == lclChr) & 
                         (kottgenData$POS >= lclStart) &
                             (kottgenData$POS <= lclEnd), ]
-    loci$LociID <- unique(region$LociID)
+    if (nrow(loci) > 0)
+        loci$LociID <- unique(region$LociID)
     
     return (loci)
 }
 
-trialLoci <- do.call(rbind, 
-                     lapply(1:6, 
-                            function (k) extractKottgen(urateUpdated, loci[loci$LociID == k, ])))
-dim(trialLoci)
-head(trialLoci)
+kottgenLoci <- do.call(rbind, 
+                     lapply(unique(loci$LociID), 
+                            function (k) extractKottgen(kottgenUrate, loci[loci$LociID == k, ])))
+dim(kottgenLoci)
+head(kottgenLoci)
 ```
 
-And plotting these:
+
+### Summary stats of the Kottgen Loci
+
+Given that there are close to 300 loci, let's look at some summary stats for these loci.
+
+1. Loci by chromosome  
 
 ```{r}
 library(ggplot2)
-plotZoom <- function (data) {
-    
-    data <- data[, c("MarkerName", "p_gc", "chrom", "POS", "LociID")]
-    colnames(data) <- c("SNP", "P", "CHR", "POS", "LociID")
-    data$P <- -log10(data$P)
-    data$POS <- data$POS / 1000000
-    
-    ggplot(data, aes(x = POS, y = P)) +
-        geom_point(colour = "steelblue") +
-        facet_wrap(~ LociID, scales = "free_x") +
-        theme_bw()
-}
-plotZoom(trialLoci)
+
+ggplot(kottgenLoci, aes(x = chrom, y = LociID)) + 
+    geom_point(colour="steelblue") + 
+    theme_bw()
 ```
+
+Not overly surprising here, that there seem to be many loci per chromosome, with more loci on the larger chromosomes. Let's consider the same plot but where each loci is sized by the p-value.
+
+```{r}
+library(ggrepel)
+kottgenByLoci <- summarise(group_by(kottgenLoci, chrom, LociID),
+                           nLoci = n(),
+                           maxP = max(-log10(p_gc)))
+head(kottgenByLoci)
+
+ggplot(kottgenByLoci, aes(x = chrom, y = LociID)) +
+    geom_point(aes(size = maxP), colour = "steelblue", alpha = 0.7) +
+    theme_bw() +
+    geom_text_repel(data = kottgenByLoci[kottgenByLoci$maxP > 5, ],
+              aes(x = chrom, y = LociID, label = LociID),
+              size = 5)
+```
+
+That's more interesting. Loci with p-value < 10-5 are labeled above. This gives us a much smaller number to look at. Let's specifically look at these loci:
+
+```{r}
+targetLoci <- c(77, 109, 133, 139, 157, 192, 213, 258, 260, 267)
+ggplot(kottgenLoci[kottgenLoci$LociID %in% targetLoci, ],
+       aes(x = POS / 1000000, y = -log10(p_gc))) +
+    geom_point(colour = "grey") +
+    facet_wrap(~chrom, scales = "free_x") +
+    theme_bw() +
+    geom_hline(yintercept = 5, colour = "blue", linetype = "dashed") +
+    geom_hline(yintercept = 8, colour = "red", linetype = "dashed") +
+    xlab('POS') + ylab("-log10(P)")
+```
+
+This is all good now. Clearly there are some interesting areas.
+
+### Plots for Tony  
+
+For Tony, I will plot all of the Loci and send these to him. However, I will order them by p-value.
+
+```{r}
+library(gridExtra)
+
+plots <- list()
+for (lx in seq(length(targetLoci))) {
+    
+    dx <- kottgenLoci[kottgenLoci$LociID == lx, ]
+    dx$position <- dx$POS / 1000000
+    
+    
+    zoom <- ggplot(dx, aes(x = position, y = -log10(p_gc))) +
+        geom_point() +
+        theme_bw()
+    
+    genes <- queryUCSC(fromUCSCEnsemblGenes(chromosome = unique(dx$chrom),
+                                            start = min(dx$POS),
+                                            end = max(dx$POS)))
+    
+    zoom <- geneAnnotation(zoom, genes)
+    plots[[lx]] <- zoom
+     
+}
+
+
+ggsave("testplots.pdf", do.call(arrangeGrob, plots))
+
+```
+
