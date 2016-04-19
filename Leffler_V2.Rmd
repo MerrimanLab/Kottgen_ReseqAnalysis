@@ -1,0 +1,243 @@
+---
+title: "Leffler_Gene_centered"
+author: "Nick Burns"
+date: "19 April 2016"
+output: html_document
+---
+
+Previously, I found loci of interest in the Leffler data, extracted these regions (padded +/- 1MB) from the Kottgen set and plotted the regions. Tony then asked me to annotate these plots with the Leffler SNPs, and I got some very odd looking regions. There are two possibilities here:  
+
+  1. Finding regions by SNP in the Leffler data is too complex, and I have made some error  
+  2. Or, I didn't ever update the positions in the Leffler dataset, and this is very likely to be causing me issues.  
+I am going to deal with (2) first and see what impact this has on the plots of the top 10 loci. Failing this, I will try an alternate route, and group the Leffler data by genes.  
+
+## Read in the Leffler and filtered Kottgen data  
+
+```{r}
+library(data.table)
+library(glida)
+library(RMySQL)
+library(ggplot2)
+library(dbscan)
+library(qqman)
+
+setwd("/home/nickb/Documents/GitHub/Kottgen_ReseqAnalysis")
+leffler <- fread("./Data/CombinedLeffler.csv")
+kottgen <- fread("./Data/Kottgen_Urate_SummaryStats_Filtered.csv")
+```
+
+I can't trust the positions in either of these files, so I will update them from UCSC.
+
+```{r}
+kPositions <- glida::queryUCSC(glida::updatePositions(kottgen$MarkerName))
+lPositions <- glida::queryUCSC(glida::updatePositions(leffler$SNP))
+
+setkey(kottgen, MarkerName)
+setkey(leffler, SNP)
+
+# update position columns
+# NOTE: I tried using data.table's update syntax, but it screwed things up
+# reverting back to merge
+leffler <- merge(leffler[, .(SNP, CHR, Gene)],
+                 lPositions[, c("SNP", "POS")],
+                 by = "SNP")
+leffler[, CHR := as.integer(CHR)]
+
+kottgen <- merge(kottgen[, .(MarkerName, chrom, p_gc)],
+                 kPositions[, c("SNP", "POS")],
+                 by.x = "MarkerName", by.y = "SNP")
+kottgen[, SNP := MarkerName]
+kottgen[, MarkerName := NULL]
+head(kottgen)
+```
+
+## Clustering Leffler Loci  
+
+Although they are patchy, I will use dbscan to cluster the Leffler loci. I will then summarise each loci (looking for the min and max positions in each loci) and plot these regions in a Manhattan of Kottgen.  
+
+**Clustering**  
+
+```{r}
+leffler[, Cluster := 0]
+
+lapply(unique(leffler[, CHR]),
+       function (chrom) {
+           
+           maxK <- leffler[, max(Cluster)]
+           leffler[CHR == chrom, 
+                   Cluster := dbscan::dbscan(as.matrix(POS),
+                                             eps = 500000,
+                                             minPts = 1)$cluster + maxK]
+       })
+
+
+head(leffler, 10)
+tail(leffler, 10)
+leffler[, max(Cluster)]
+```
+
+Alright, there are 388 clusters. 
+
+
+**Summarise each cluster**  
+
+Originally, I had only focused on the CHR, Start and End. But it will be very useful to include the SNPs which belong to this region as well.
+
+```{r}
+regions <- leffler[, .(CHR = min(CHR),
+                       Start = min(POS),
+                       End = max(POS),
+                       SNP,
+                       POS),
+                   by = Cluster]
+head(regions, 10)
+dim(regions)
+```
+
+I like this the data.table way :) Much nicer than dplyr.
+
+**Plot Manhattan of Kottgen data**  
+
+Let's plot a Manhattan plot of the Kottgen data, highlighting the regions above.  
+
+```{r}
+snpsOfInterest <- lapply(unique(regions[, Cluster]), 
+                         function (rx) {
+                             lclRegion <- regions[Cluster == rx]
+                             
+                             return (kottgen[chrom == lclRegion$CHR &
+                                                 POS >= (lclRegion$Start - 500000) &
+                                                 POS <= (lclRegion$End + 500000), SNP])
+                         })
+snpsOfInterest <- unlist(snpsOfInterest)
+length(snpsOfInterest)
+head(snpsOfInterest, 30)
+
+kottgen[chrom == "X", chrom := "23"]
+kottgen[, chrom := as.integer(.SD[, chrom])]
+kottgen[p_gc == 0, p_gc := 1]   # remove ones where P==0
+qqman::manhattan(kottgen, chr = "chrom", bp = "POS", p = "p_gc", highlight = snpsOfInterest)
+```
+
+Check it out - I have found a cooler way to come up with SNPs within the regions, using a full cross join and a having clause:
+
+```{r}
+# NOTES: 
+#    both tables must have a key defined (though I don't think they necessarily need to be named the same)
+#    allow.cartesian = TRUE    performs full cartesian join (on chromosomes)
+#    chaining conditions provides a "having clause"-like effect (filtering to within regions)
+regions[CHR == "X", CHR := "23"]
+regions[, chrom := as.integer(CHR)]
+
+setkey(regions, chrom)
+setkey(kottgen, chrom)
+
+
+xRegions <- kottgen[regions, allow.cartesian = TRUE][, 
+    .(SNP, p_gc, POS, Start = min(Start) - 500000, End = max(End) + 500000), 
+    by = Cluster][
+        POS > Start & POS < End,
+        .SD,
+        by = Cluster]
+
+# and to check that these are the same:
+length(unique(snpsOfInterest)) == length(unique(xRegions[, SNP]))
+all(snpsOfInterest %in% xRegions[, SNP])
+par(mfrow = c(2, 1))
+qqman::manhattan(kottgen, chr = "chrom", bp = "POS", p = "p_gc", highlight = snpsOfInterest)
+qqman::manhattan(kottgen, chr = "chrom", bp = "POS", p = "p_gc", highlight = xRegions[, SNP])
+par(mfrow = c(1, 1))
+```
+
+This is definitely tidy code - the only trick is that it will need really good documentation to explain what is going on here.  It is also much faster (0.168 seconds, vs. 9 seconds).
+
+## Visualising the loci  
+
+There are 146 loci. I want to rank these by decreasing effect size, and then create locus zooms.  
+
+**Rank loci**  
+
+Given xSNPs above, I can now quite easily use data.table to rank the regions  
+
+```{r}
+rankLoci <- xRegions[, .(effect = min(p_gc)), by = Cluster][order(effect)]
+rankLoci[, Rank := 1:.N]
+setkey(rankLoci, Rank)
+```
+
+Visualise one loci:  
+
+```{r}
+setkey(regions, Cluster)
+setkey(rankLoci, Rank)
+setkey(leffler, SNP)
+setkey(kottgen, SNP)
+#xRegions[, POS := POS * 1000000]
+
+
+visualiseLoci <- function (K) {
+    
+    Ck <- rankLoci[K, Cluster]
+    SNPs <- leffler[Cluster == Ck, SNP]
+    #print(leffler[Cluster == Ck])
+    
+    zoom <- ggplot(xRegions[Cluster == Ck], aes(x = POS, y = -log10(p_gc))) +
+        geom_point(colour = "gray30", alpha = 0.5) +
+        theme_bw()
+    
+    genes <- glida::queryUCSC(fromUCSCEnsemblGenes(chromosome = regions[Cluster == Ck, min(CHR)], 
+                                                   start = regions[Cluster == Ck, min(Start)] - 500000, 
+                                                   end = regions[Cluster == Ck, max(End)] + 500000))
+    
+    zoom <- glida::geneAnnotation(zoom, genes)
+    
+    dataPanel <- ggplot2::ggplot_build(zoom)$panel
+    
+    # annotate with Leffler SNPs
+    labelData <- merge(leffler[SNPs],
+                       kottgen[SNPs],
+                       by = "SNP",
+                       all.x = TRUE)
+    labelData[is.na(p_gc), p_gc := 1]
+    
+    #print(labelData)
+    zoom <- zoom + geom_point(data = labelData, aes(x = POS.x / 1000000,
+                                             y = -log10(p_gc)),
+                              colour = "red",
+                              alpha = 0.5,
+                              size = 7) +
+        ggrepel::geom_label_repel(data = labelData,
+                     aes(x = POS.x/1000000, y = -log10(p_gc), label = SNP),
+                     colour = "red", size = 5, 
+                     nudge_x = 0.25 * diff(dataPanel$ranges[[1]]$x.range), 
+                     nudge_y = sd(dataPanel$ranges[[1]]$y.major_source)) +
+        ggtitle(sprintf("Chromosome %s (Rank %s)", regions[Cluster == Ck, min(CHR)], K)) +
+        xlab("Position (Mb)") + ylab("-log10(P)") +
+        geom_hline(yintercept = -log10(1e-05), colour = "blue", linetype = "dashed") +
+        geom_hline(yintercept = -log10(5e-08), colour = "red", linetype = "dashed") +
+        geom_hline(yintercept = 0, colour = "gray30")
+    
+    fileName <- sprintf("LociPlots/Rank_%s_Chromosome_%s.png", K, regions[Cluster == Ck, min(CHR)])
+    ggsave(fileName, zoom)
+    
+    return (zoom)
+
+}
+visualiseLoci(1)
+lociPlots <- lapply(head(rankLoci[, Rank], 100),visualiseLoci)
+#length(lociPlots)
+```
+
+I am reasonably well convinced by these now. The NEW regions are very similar to the OLD regions, but there are some differences:  
+
+  - the OLD regions were centered around the max(P) SNP within the region  
+  - the NEW regions are centered around the Leffler SNP instead. So the regions are similar, but not identical.  
+  - However, the chromosomes and the general region is the same, and the genes are as I would expect. 
+  - I have also triple checked that the "Nearest Gene" suggested by Leffler is in fact a central gene in the plots.  
+  
+Yay.
+
+Things to think about:  
+
+  - glida::fromUCSCEnsemblGenes(): should this automatically search for a wider region? As it is, it takes the Start and End as given and does not pad it at all.  
+  - POS: should I work with MB as soon as possible? Leaving things in Base Pairs can lead to silly plotting errors.  

@@ -37,7 +37,7 @@ filterGwas <- function (data, threshold = 0.1) {
     return (data[data$p_gc < threshold, ])
 }
 
-write.csv(filterGwas(urate), "Kottgen_Urate_SummaryStats_Filtered.csv", row.names=FALSE)
+#write.csv(filterGwas(urate), "Kottgen_Urate_SummaryStats_Filtered.csv", row.names=FALSE)
 ```
 
 ## 2. Get chromosome and position  
@@ -45,23 +45,23 @@ write.csv(filterGwas(urate), "Kottgen_Urate_SummaryStats_Filtered.csv", row.name
 These summary files do not include chromosome numbers or position. Need to query these based on the marker name. I will test this function here, and then include it in GLIDA.
 
 ```{r}
-urate <- filterGwas(urate, threshold=0.1)
-
-library(glida)
-
-snpPOS <- queryUCSC(updatePositions(urate$MarkerName))
-urate <- merge(urate, snpPOS, by.x = "MarkerName", by.y = "SNP")
-
-urate$chrom <- gsub("chr", "", urate$chrom)
-
-head(urate)
+# urate <- filterGwas(urate, threshold=0.1)
+# 
+# library(glida)
+# 
+# snpPOS <- queryUCSC(updatePositions(urate$MarkerName))
+# urate <- merge(urate, snpPOS, by.x = "MarkerName", by.y = "SNP")
+# 
+# urate$chrom <- gsub("chr", "", urate$chrom)
+# 
+# head(urate)
 ```
 
 For convenience, I will write this working set out to file.
 
 ```{r}
 setwd("/home/nickb/Documents/GitHub/Kottgen_ReseqAnalysis")
-write.csv(urate, "Data/Kottgen_Urate_SummaryStats_Filtered.csv", row.names = FALSE)
+#write.csv(urate, "Data/Kottgen_Urate_SummaryStats_Filtered.csv", row.names = FALSE)
 ```
 
 ## 3. Leffler: Identify Regions of interest  
@@ -80,12 +80,13 @@ head(leffler5)
 We will combine both of these tables and treat them as a single dataset to explore.
 
 ```{r}
-lefflerCombined <- leffler4[, c("Chr19", "Position_hg19", "SNP")]
-colnames(lefflerCombined) <- c("CHR", "POS", "SNP")
+lefflerCombined <- leffler4[, c("Chr19", "Position_hg19", "SNP", "Closest.Gene")]
+colnames(lefflerCombined) <- c("CHR", "POS", "SNP", "Gene")
 lefflerCombined <- rbind(lefflerCombined,
                          data.frame(CHR = leffler5$Chr_hg19, 
                                     POS = leffler5$Position_hg19,
-                                    SNP = leffler5$SNP))
+                                    SNP = leffler5$SNP,
+                                    Gene = leffler5$Gene))
 dim(lefflerCombined)
 head(lefflerCombined)
 ```
@@ -233,7 +234,7 @@ For Tony, we will plot the top 50 loci (ordered by p-values). Each loci will be 
 
 ```{r}
 library(glida)
-K <- 30
+K <- 10
 
 getKottgenLoci <- function (loci, urate, delta = 500000) {
     lclLoci <- urate[urate$chrom == loci$chrom, ]
@@ -257,9 +258,12 @@ for (i in 1:K) {
     lclData <- getKottgenLoci(lclLoci, urate)
     lclData$position <- lclData$POS / 1000000
     
+    lefflerMarker <- as.character(
+        unique(lefflerCombined[lefflerCombined$CHR == lclLoci$chrom, "Gene"]))
+    
     # create the locus zoom
     zoom <- ggplot(lclData, aes(x = position, y = -log10(p_gc))) +
-        geom_point() +
+        geom_point(colour = "grey30") +
         theme_bw()
     
     genes <- queryUCSC(fromUCSCEnsemblGenes(chromosome = unique(lclData$chrom),
@@ -267,6 +271,19 @@ for (i in 1:K) {
                                             end = max(lclData$POS)))
     
     zoom <- geneAnnotation(zoom, genes)
+    
+    if (any(genes$GeneName %in% lefflerMarker)) {
+        
+        labelData <- ggplot_build(zoom)$data[[3]]
+        labelData <- labelData[labelData$label %in% lefflerMarker, ]
+        print(sum(genes$GeneName %in% lefflerMarker))
+        zoom <- zoom + geom_point(
+            data = labelData,
+            aes(x = x, y = y), colour = labelData$colour,
+            alpha = 0.7,
+            size = 5
+        )
+    }
     
     plotTitle <- sprintf("Chromosome %s: (Rank %s)", lclLoci$chrom, i)
     zoom <- zoom + 
@@ -276,12 +293,12 @@ for (i in 1:K) {
         ggtitle(plotTitle)
     
     filename <- sprintf("LociPlots/Rank_%s_Chromosome_%s.png", i, lclLoci$chrom)
-    ggsave(filename, zoom)
+    #ggsave(filename, zoom)
     
     lociPlots[[i]] <- zoom
 }
 
 # write the loci summary to disk as well.
-write.csv(kottgenByLoci, "rank_loci_summary.csv", row.names = F)
+#write.csv(kottgenByLoci, "rank_loci_summary.csv", row.names = F)
 ```
 

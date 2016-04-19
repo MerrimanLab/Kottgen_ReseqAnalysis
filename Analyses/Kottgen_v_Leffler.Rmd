@@ -21,25 +21,25 @@ Filter datasets to P <= 0.1.
 setwd("/mnt/DataDrive/Kottgen")
 library(data.table)
 
-urate <- fread("GUGC_MetaAnalysis_Results_UA.csv", header=TRUE, data.table = FALSE)
-dim(urate)
-
-gout <- fread("GUGC_MetaAnalysis_Results_Gout.csv", header=TRUE, data.table = FALSE)
-dim(gout)
+# urate <- fread("GUGC_MetaAnalysis_Results_UA.csv", header=TRUE, data.table = FALSE)
+# dim(urate)
+# 
+# gout <- fread("GUGC_MetaAnalysis_Results_Gout.csv", header=TRUE, data.table = FALSE)
+# dim(gout)
 ```
 
 Here is hte head of these two files:
 
 ```{r}
-head(urate)
-head(gout)
+# head(urate)
+# head(gout)
 ```
 
 Looking at the distribution of p-values:
 
 ```{r}
-hist(urate$p_gc)
-hist(gout$p_gc)
+# hist(urate$p_gc)
+# hist(gout$p_gc)
 ```
 
 And we will filter these to p-values <= 0.01, which we can see from the above plots will end up being < 10 % the size.
@@ -49,8 +49,8 @@ filterGwas <- function (data, threshold = 0.01) {
     return (data[data$p_gc < threshold, ])
 }
 
-write.csv(filterGwas(urate), "Kottgen_Urate_SummaryStats_Filtered.csv", row.names=FALSE)
-write.csv(filterGwas(gout), "Kottgen_Gout_SummaryStats_Filtered.csv", row.names=FALSE)
+# write.csv(filterGwas(urate), "Kottgen_Urate_SummaryStats_Filtered.csv", row.names=FALSE)
+# write.csv(filterGwas(gout), "Kottgen_Gout_SummaryStats_Filtered.csv", row.names=FALSE)
 ```
 
 ### Get chromosome and position  
@@ -58,8 +58,8 @@ write.csv(filterGwas(gout), "Kottgen_Gout_SummaryStats_Filtered.csv", row.names=
 These summary files do not include chromosome numbers or position. Need to query these based on the marker name. I will test this function here, and then include it in GLIDA.
 
 ```{r}
-urateSet <- filterGwas(urate, threshold=0.1)
-goutSet <- filterGwas(gout, threshold = 0.1)
+# urateSet <- filterGwas(urate, threshold=0.1)
+# goutSet <- filterGwas(gout, threshold = 0.1)
 
 library(RMySQL)
 
@@ -100,21 +100,21 @@ updatePos <- function (snpList) {
     return (snpList)
 }
 
-urateUpdated <- updatePos(urateSet)
-goutUpdated <- updatePos(goutSet)
+# urateUpdated <- updatePos(urateSet)
+# goutUpdated <- updatePos(goutSet)
 ```
 
 Parse the chromosome column and remove the 'chr' prefix:
 
 ```{r}
-urateUpdated$chrom <- sub("chr", "", urateUpdated$chrom)
-goutUpdated$chrom <- sub("chr", "", goutUpdated$chrom)
-
-head(urateUpdated)
-head(goutUpdated)
-
-write.csv(urateUpdated, "Kottgen_Urate_SummaryStats_Filtered.csv")
-write.csv(goutUpdated, "Kottgen_Gout_SummaryStats_Filtered.csv")
+# urateUpdated$chrom <- sub("chr", "", urateUpdated$chrom)
+# goutUpdated$chrom <- sub("chr", "", goutUpdated$chrom)
+# 
+# head(urateUpdated)
+# head(goutUpdated)
+# 
+# write.csv(urateUpdated, "Kottgen_Urate_SummaryStats_Filtered.csv")
+# write.csv(goutUpdated, "Kottgen_Gout_SummaryStats_Filtered.csv")
 ```
 
 ## Leffler: Identify Regions of interest  
@@ -297,6 +297,7 @@ For Tony, I will plot all of the Loci and send these to him. However, I will ord
 
 ```{r}
 library(gridExtra)
+library(glida)
 
 plots <- list()
 for (lx in seq(length(targetLoci))) {
@@ -319,7 +320,7 @@ for (lx in seq(length(targetLoci))) {
 }
 
 
-ggsave("testplots.pdf", do.call(arrangeGrob, plots))
+#ggsave("testplots.pdf", do.call(arrangeGrob, plots))
 
 ```
 
